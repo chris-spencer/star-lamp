@@ -1,0 +1,6 @@
+# Run app: python3 -m streamlit run app.py  (avoids PATH issues with ~/Library/Python/.../bin)
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+trimesh>=4.0.0
+manifold3d>=2.4.0
