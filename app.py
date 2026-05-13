@@ -36,6 +36,24 @@ st.set_page_config(page_title="Star lamp / planetarium shade", layout="wide")
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
+HYG_REFRESH_COOLDOWN = dt.timedelta(hours=24)
+
+
+def _hyg_download_cooldown(hyg_path: Path) -> tuple[bool, dt.datetime | None]:
+    """
+    Catalogue files are large; discourage hammering upstream. Block re-download if the CSV
+    was written within ``HYG_REFRESH_COOLDOWN``.
+
+    Returns ``(blocked, unlocks_at_utc)`` — ``unlocks_at_utc`` is set only when blocked.
+    """
+    if not hyg_path.exists():
+        return False, None
+    mtime = dt.datetime.fromtimestamp(hyg_path.stat().st_mtime, tz=dt.timezone.utc)
+    unlock = mtime + HYG_REFRESH_COOLDOWN
+    if dt.datetime.now(dt.timezone.utc) >= unlock:
+        return False, None
+    return True, unlock
+
 
 def _utc_for_display(when: dt.datetime) -> dt.datetime:
     """Normalise to UTC for labels."""
@@ -81,33 +99,62 @@ def main() -> None:
     if "utc_time" not in st.session_state:
         st.session_state.utc_time = dt.time(22, 0)
 
-    st.title("Constellation lamp shade")
+    st.title("Constellation Lamp Shade")
+    st.caption(
+        "Build a hollow, printable STL **dome cap** (upper **hemisphere** of the shell)—**one bore per chosen star**. "
+        "Directions come from catalogue **coordinates** projected to **altitude & azimuth** for your "
+        "**latitude**, **longitude**, and **UTC** time, matching **geometric** overhead placements (apex = zenith, "
+        "rim on the horizon plane). **Atmospheric refraction** is **not** included."
+    )
 
     with st.sidebar:
         st.header("Catalogue")
         hyg_path = default_hyg_path()
-        if st.button("Download or update star catalogue"):
+        have_catalog_csv = hyg_path.exists()
+        dl_cooldown, dl_unlock = _hyg_download_cooldown(hyg_path)
+        dl_label = "Update Star Charts" if have_catalog_csv else "Download Star Charts"
+        if have_catalog_csv and dl_cooldown and dl_unlock is not None:
+            dl_help = (
+                "Within 24 hours of your last download or save. "
+                f"Unlocks {_format_when_utc_friendly(dl_unlock)}."
+            )
+        elif have_catalog_csv:
+            dl_help = "Fetch the latest HYG catalogue from upstream and overwrite your local CSV."
+        else:
+            dl_help = "Download the star catalogue CSV once so the app can resolve constellations and names."
+
+        if st.button(
+            dl_label,
+            disabled=have_catalog_csv and dl_cooldown,
+            help=dl_help,
+        ):
             ensure_hyg_csv(hyg_path, force=True)
             cached_hyg.clear()
-            st.success("Star catalogue updated — you're ready to plot stars.")
+            st.success("Star charts updated — you're ready to plot stars.")
 
         freshness = hyg_catalog_freshness(hyg_path, _cached_upstream_hyg_commit())
         if freshness == "missing":
-            st.warning("Star catalogue not found — use the button above once.")
+            st.warning("Star catalogue not found — use **Download Star Charts** above.")
         elif freshness == "current":
             st.success("Star catalogue is up to date.")
         elif freshness == "stale":
-            st.warning(
-                "Your star catalogue may be **out of date**. "
-                "Use **Download or update star catalogue** to fetch the latest file."
-            )
+            if have_catalog_csv and dl_cooldown:
+                st.warning(
+                    "Your star catalogue may be **out of date**. "
+                    "Use **Update Star Charts** once the cooldown has ended."
+                )
+            else:
+                st.warning(
+                    "Your star catalogue may be **out of date**. Tap **Update Star Charts** "
+                    "to fetch the latest file."
+                )
         else:
             st.info(
                 "Star catalogue is on your computer, but we couldn't check for updates "
                 "(offline or GitHub rate limiting). Try again later."
             )
 
-        st.subheader("Star brightness")
+        st.subheader("Star Brightness")
         st.caption(
             "Fainter stars have **higher** magnitude numbers. Only stars **at or above** "
             "your chosen brightness are used (we keep mag ≤ limit)."
@@ -137,7 +184,7 @@ def main() -> None:
 
         st.divider()
         if st.button(
-            "Reset session",
+            "Reset Session",
             help="Clear constellations cache in memory, time, STL, and reload defaults.",
         ):
             for _k in list(st.session_state.keys()):
@@ -155,13 +202,13 @@ def main() -> None:
     with c1:
         st.subheader("Constellations")
         labels = st.multiselect(
-            "IAU constellations",
+            "IAU Constellations",
             options=LABELS_SORTED,
             default=["Ursa Major", "Orion", "Cassiopeia"],
             help="Uses your brightness preset from the sidebar (stars with mag ≤ that limit).",
         )
         extra = st.text_input(
-            "Extra IAU codes (optional)",
+            "Extra IAU Codes (optional)",
             placeholder="e.g. UMi, CMa",
             help="Three-letter abbreviations from the HYG `con` column, comma or space separated.",
         )
@@ -191,9 +238,9 @@ def main() -> None:
                 )
 
     with c2:
-        st.subheader("Named stars")
+        st.subheader("Named Stars")
         extra_names = st.text_area(
-            "Proper names (comma-separated)",
+            "Proper Names (comma-separated)",
             value="Polaris",
             height=100,
             help="HYG `proper` field, e.g. Polaris, Betelgeuse, Sirius. Case-insensitive.",
@@ -224,7 +271,7 @@ def main() -> None:
 
     selected_core = merge_star_selections(parts)
 
-    st.subheader("Observer & time")
+    st.subheader("Location & Time")
     oc1, oc2, oc3 = st.columns(3)
     with oc1:
         lat = st.number_input(
@@ -242,11 +289,11 @@ def main() -> None:
         )
     with oc3:
         min_alt = st.number_input(
-            'Minimum altitude (°, "fake horizon")',
+            'Minimum Altitude (°, "fake horizon")',
             value=20.0,
             step=1.0,
             help="With **Sky** dome layout, only stars at least this high appear in the STL. "
-            "Preview always lists all selected stars.",
+            "**Star Table** always lists all selected stars.",
         )
 
     pud = st.session_state.pop("pending_utc_date", None)
@@ -273,7 +320,7 @@ def main() -> None:
         help=(
             "Uses **only** constellations, extra codes, and named stars—not background fillers. "
             "Sets UTC date/time so the lowest chosen star is as high as possible (within 366 days, "
-            "20-minute coarse step); astronomical horizon only. Fillers apply afterward for preview/STL."
+            "20-minute coarse step); astronomical horizon only. Fillers apply afterward for Star Table/STL."
         ),
     ):
         found, msg = find_best_utc_maximin(
@@ -350,7 +397,7 @@ def main() -> None:
     cfg = HorizonConfig(lat_deg=float(lat), lon_deg_east=float(lon), when_utc=when)
     with_horizon = add_horizon_columns(selected, cfg)
 
-    st.subheader("Preview")
+    st.subheader("Star Table")
     ok = False
     if with_horizon.empty:
         st.info("No stars match your filters — lower magnitude, add names, or fix codes.")
@@ -382,9 +429,35 @@ def main() -> None:
             st.error(
                 f"{len(viol)} star(s) below {min_alt:.1f}° — change date/time, location, or selection."
             )
-        st.dataframe(show.sort_values("alt_deg", ascending=False), width="stretch")
+        display = show.sort_values("alt_deg", ascending=False).rename(
+            columns={
+                "proper": "Name",
+                "con": "Constellation",
+                "bayer": "Bayer",
+                "mag": "Magnitude",
+                "ra": "RA (h)",
+                "dec": "Declination (°)",
+                "alt_deg": "Altitude (°)",
+                "az_deg": "Azimuth (°)",
+            }
+        )
+        st.dataframe(
+            display,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Magnitude": st.column_config.NumberColumn(format="%.2f"),
+                "RA (h)": st.column_config.NumberColumn(format="%.4f"),
+                "Declination (°)": st.column_config.NumberColumn(format="%.4f"),
+                "Altitude (°)": st.column_config.NumberColumn(format="%.2f"),
+                "Azimuth (°)": st.column_config.NumberColumn(
+                    format="%.2f",
+                    help="Horizontal bearing: north 0°, east 90°, south 180°, west 270°.",
+                ),
+            },
+        )
 
-    st.subheader("Geometry & STL export")
+    st.subheader("Geometry & STL Export")
 
     if with_horizon.empty:
         for_stl = with_horizon
@@ -488,7 +561,12 @@ def main() -> None:
         )
         try:
             fig = stl_preview.figure_from_stl_bytes(blob)
-            st.plotly_chart(fig, use_container_width=True, key="stl_preview_chart")
+            st.plotly_chart(
+                fig,
+                width="stretch",
+                key="stl_preview_chart",
+                config={"displaylogo": False},
+            )
         except Exception as e:
             st.warning(f"Could not build 3D preview: {e}")
 
