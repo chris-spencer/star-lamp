@@ -413,12 +413,12 @@ def main() -> None:
         shell_thickness = st.number_input("Shell wall thickness (mm)", value=3.0, min_value=0.5)
     with g2:
         base_rr = st.number_input(
-            "Rod base radius (mm)",
-            value=1.0,
+            "Maximum Hole Size (mm)",
+            value=0.8,
             min_value=0.2,
             max_value=1.0,
         )
-        min_rr = st.number_input("Rod min radius (mm)", value=0.35, min_value=0.1)
+        min_rr = st.number_input("Minimum Hole Size (mm)", value=0.35, min_value=0.1)
         mq_map = dict(mesh_export.mesh_quality_presets())
         mq = st.selectbox(
             "STL mesh quality",
