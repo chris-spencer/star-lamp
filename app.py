@@ -169,11 +169,7 @@ def main() -> None:
                     "to fetch the latest file."
                 )
         else:
-            st.success(
-                "Star catalogue **is loaded** — the app runs normally. **Version check** against GitHub did not "
-                "complete (temporary network/API limits—typical on shared hosting such as Streamlit Community Cloud). "
-                "STL export still works. *Optional:* add Streamlit secret **`GITHUB_TOKEN`** (GitHub PAT) for higher GitHub quotas."
-            )
+            st.success("**Star catalogue is loaded.**")
 
         st.subheader("Star Brightness")
         st.caption(
