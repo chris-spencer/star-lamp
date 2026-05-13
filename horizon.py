@@ -60,7 +60,7 @@ class HorizonConfig:
 def alt_az_arrays(
     ra_hours: np.ndarray, dec_deg: np.ndarray, cfg: HorizonConfig
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Vectorized altitude/azimuth; RA in decimal hours matching :func:`altitude_azimuth`."""
+    """Vectorised altitude/azimuth; RA in decimal hours matching :func:`altitude_azimuth`."""
     jd = _julian_date(cfg.when_utc)
     lst = local_sidereal_time_deg(jd, cfg.lon_deg_east)
     ra_deg = np.mod(ra_hours, 24.0) * 15.0
@@ -92,7 +92,7 @@ def peak_altitude_deg(dec_deg: float, lat_deg: float) -> float:
 
 
 def peak_altitudes_deg_array(dec_deg: np.ndarray | pd.Series, lat_deg: float) -> np.ndarray:
-    """Vectorized :func:`peak_altitude_deg` for many declinations (same latitude)."""
+    """Vectorised :func:`peak_altitude_deg` for many declinations (same latitude)."""
     d = np.asarray(dec_deg, dtype=float)
     dec = np.radians(d)
     lat = math.radians(lat_deg)
@@ -153,7 +153,7 @@ def _refine_maximin(
     floor_alt: float | None,
     step_minutes: int = 1,
 ) -> tuple[datetime, float]:
-    """1-minute sweep in [center-half_width, center+half_width] to maximize bottleneck altitude."""
+    """1-minute sweep centred on ``center``, ± ``half_width``; maximise bottleneck altitude."""
     lo_t = max(t_min, center - half_width)
     hi_t = center + half_width
     step = timedelta(minutes=step_minutes)
@@ -183,7 +183,7 @@ def find_best_utc_maximin(
     step_minutes: int = 20,
 ) -> tuple[datetime | None, str]:
     """
-    Time in [start_utc, start_utc + max_days] that maximizes the *lowest* star altitude
+    Time in [start_utc, start_utc + max_days] that maximises the *lowest* star altitude
     (maximin). If any instant meets min_alt_deg, the best time is chosen among those;
     otherwise the global maximin is returned with an explanatory note.
     """
@@ -242,7 +242,7 @@ def find_best_utc_maximin(
     else:
         notes.append(
             f"No sampled time in this window had every star ≥ {min_alt_deg:.1f}°. "
-            f"This time maximizes the lowest star ({final_score:.1f}°) — try a lower floor or "
+            f"This time maximises the lowest star ({final_score:.1f}°) — try a lower floor or "
             "a longer search."
         )
 

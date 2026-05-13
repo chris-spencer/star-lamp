@@ -37,6 +37,25 @@ st.set_page_config(page_title="Star lamp / planetarium shade", layout="wide")
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
+def _utc_for_display(when: dt.datetime) -> dt.datetime:
+    """Normalise to UTC for labels."""
+    if when.tzinfo is None:
+        return when.replace(tzinfo=dt.timezone.utc)
+    return when.astimezone(dt.timezone.utc)
+
+
+def _format_when_utc_friendly(when: dt.datetime) -> str:
+    """e.g. 22 March 2027, 18:20 UTC."""
+    return _utc_for_display(when).strftime("%d %B %Y, %H:%M UTC")
+
+
+def _format_lat_lon_friendly(lat: float, lon: float) -> str:
+    """e.g. 53.11°N, 1.22°W."""
+    ns = "N" if lat >= 0 else "S"
+    ew = "E" if lon >= 0 else "W"
+    return f"{abs(lat):.2f}°{ns}, {abs(lon):.2f}°{ew}"
+
+
 @st.cache_data(show_spinner=False)
 def cached_hyg(csv_path_str: str) -> pd.DataFrame:
     return load_hyg(Path(csv_path_str))
@@ -65,27 +84,27 @@ def main() -> None:
     st.title("Constellation lamp shade")
 
     with st.sidebar:
-        st.header("Catalog")
+        st.header("Catalogue")
         hyg_path = default_hyg_path()
-        if st.button("Download / refresh HYG v3"):
+        if st.button("Download or update star catalogue"):
             ensure_hyg_csv(hyg_path, force=True)
             cached_hyg.clear()
-            st.success("HYG catalog downloaded — you are ready to plot stars.")
+            st.success("Star catalogue updated — you're ready to plot stars.")
 
         freshness = hyg_catalog_freshness(hyg_path, _cached_upstream_hyg_commit())
         if freshness == "missing":
-            st.warning("HYG catalog not found yet — click the button above once.")
+            st.warning("Star catalogue not found — use the button above once.")
         elif freshness == "current":
-            st.success("HYG catalog is present and up to date with upstream.")
+            st.success("Star catalogue is up to date.")
         elif freshness == "stale":
             st.warning(
-                "Your HYG catalog may be **out of date** compared to upstream. "
-                "Use **Download / refresh HYG v3** to pull the newest file."
+                "Your star catalogue may be **out of date**. "
+                "Use **Download or update star catalogue** to fetch the latest file."
             )
         else:
             st.info(
-                "HYG catalog is present — could not check GitHub right now "
-                "(offline or rate limiting). Retry later or refresh manually."
+                "Star catalogue is on your computer, but we couldn't check for updates "
+                "(offline or GitHub rate limiting). Try again later."
             )
 
         st.subheader("Star brightness")
@@ -167,7 +186,7 @@ def main() -> None:
                     6.5,
                     float(min(mag_limit + 1.0, 6.5)),
                     0.1,
-                    help="Still only catalog stars from HYG: magnitudes strictly fainter than your sidebar cut "
+                    help="Still only catalogue stars from HYG: magnitudes strictly fainter than your sidebar cut "
                     "(between that cut and here). Higher numbers are dimmer.",
                 )
 
@@ -271,7 +290,7 @@ def main() -> None:
             st.session_state.pending_utc_time = found.time()
             st.session_state.find_msg = (
                 "ok",
-                f"{found.isoformat()} UTC — {msg}",
+                f"Best time set to {_format_when_utc_friendly(found)} — {msg}",
             )
         else:
             st.session_state.find_msg = ("bad", msg)
@@ -309,7 +328,8 @@ def main() -> None:
             added = len(cand)
             if added:
                 st.caption(
-                    f"Sky padding: **{added}** catalog stars visibly ≥ **{float(min_alt):.1f}°** at **{when.isoformat()}** "
+                    f"Sky padding: **{added}** catalogue stars visibly ≥ **{float(min_alt):.1f}°** "
+                    f"on **{_format_when_utc_friendly(when)}** "
                     f"({mag_band} in magnitude band; {n_peak} could reach that height sometime from your latitude)."
                 )
             elif mag_band == 0:
@@ -354,8 +374,9 @@ def main() -> None:
         ok = len(viol) == 0
         if ok:
             st.success(
-                f"All {len(show)} stars are ≥ {min_alt:.1f}° altitude at {when.isoformat()} "
-                f"(lat {lat:.2f}°, lon {lon:.2f}°)."
+                f"All **{len(show)}** stars are at least **{min_alt:.1f}°** above the horizon on "
+                f"**{_format_when_utc_friendly(when)}**, for an observer at "
+                f"**{_format_lat_lon_friendly(float(lat), float(lon))}**."
             )
         else:
             st.error(
@@ -412,8 +433,8 @@ def main() -> None:
 
     st.markdown("##### Export STL")
     st.caption(
-        "**trimesh** + **manifold3d**: hollow shell with through-holes for each star. "
-        "Download the file and print."
+        "The export is a **hollow dome** with **one through-hole per star**. "
+        "**Download** the STL, send it through your slicer, and print."
     )
 
     if "stl_blob" not in st.session_state:

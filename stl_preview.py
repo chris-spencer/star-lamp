@@ -82,12 +82,11 @@ def figure_from_stl_bytes(
                 i=f[:, 0],
                 j=f[:, 1],
                 k=f[:, 2],
-                color="#b8c5d6",
-                # Smooth normals on CSG meshes make long skinny facets look like radial "stress lines".
-                # Flat facets read closer to lit plaster and match what an STL literally is (flat triangles).
+                color="#0d0d0d",
+                # Flat facets avoid smooth-normal artefacts on skinny CSG facets; readable on white bg.
                 flatshading=True,
-                lighting=dict(ambient=0.78, diffuse=0.32, specular=0.12, roughness=0.45),
-                lightposition=dict(x=60, y=140, z=220),
+                lighting=dict(ambient=0.42, diffuse=0.5, specular=0.2, roughness=0.35),
+                lightposition=dict(x=-80, y=160, z=260),
             )
         ],
     )
@@ -113,11 +112,11 @@ def figure_from_stl_bytes(
                 showgrid=False,
                 zeroline=False,
             ),
-            bgcolor="rgb(32, 36, 42)",
+            bgcolor="#ffffff",
             camera=dict(eye=dict(x=1.35, y=1.35, z=0.95)),
         ),
-        paper_bgcolor="rgb(24, 27, 32)",
-        font=dict(color="#e8eaed"),
+        paper_bgcolor="#ffffff",
+        font=dict(color="#1f1f1f"),
         margin=dict(l=0, r=0, t=48, b=0),
         height=height_px,
     )
