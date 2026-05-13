@@ -144,7 +144,7 @@ def main() -> None:
                 del st.session_state[_k]
             st.rerun()
 
-        st.caption(f"Copyright Chris Spencer {dt.date.today().year}")
+        st.caption("Designed by Chris Spencer")
 
     if not hyg_path.exists():
         st.stop()
