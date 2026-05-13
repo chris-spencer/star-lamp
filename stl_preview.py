@@ -4,31 +4,72 @@ from __future__ import annotations
 
 import io
 
+import numpy as np
 import plotly.graph_objects as go
 import trimesh
 
-DEFAULT_MAX_FACES = 45_000
+DEFAULT_PREVIEW_FACE_CAP = 220_000  # only simplify *browser* mesh when STL exceeds this (Plotly FPS)
+
+
+def _clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    m = mesh.copy()
+    mask = m.nondegenerate_faces()
+    if hasattr(m, "unique_faces"):
+        mask = mask & m.unique_faces()
+    m.update_faces(mask)
+    m.remove_unreferenced_vertices()
+    return m
+
+
+def _split_long_preview_edges(mesh: trimesh.Trimesh, max_faces_budget: int) -> trimesh.Trimesh:
+    """
+    Hole booleans tend to spawn very long skinny triangles; Plotly's smooth shading exaggerates those
+    as dark streaks. Subdivide-by-edge-length only when the mesh is still moderate size.
+    """
+    if len(mesh.faces) > 100_000:
+        return mesh
+    diag = float(np.linalg.norm(mesh.bounds[1] - mesh.bounds[0]))
+    if diag <= 1e-9:
+        return mesh
+    max_edge = diag * 0.022
+    try:
+        m = mesh.subdivide_to_size(max_edge=max_edge, max_iter=6)
+        m = _clean_mesh(m)
+    except BaseException:
+        return mesh
+    if len(m.faces) > max_faces_budget:
+        return mesh
+    return m
+
+
+def _maybe_decimate_for_plotly(mesh: trimesh.Trimesh, face_cap: int) -> trimesh.Trimesh:
+    """Avoid changing hole geometry; decimate only for very heavy meshes."""
+    if len(mesh.faces) <= face_cap:
+        return mesh
+    try:
+        red = mesh.simplify_quadric_decimation(int(face_cap))
+    except BaseException:
+        return mesh
+    return _clean_mesh(red)
 
 
 def figure_from_stl_bytes(
     stl_bytes: bytes,
     *,
-    max_faces: int = DEFAULT_MAX_FACES,
+    max_faces: int = DEFAULT_PREVIEW_FACE_CAP,
     title: str = "Shade preview",
     height_px: int = 520,
 ) -> go.Figure:
-    """Load STL bytes into a rotatable Plotly mesh (optionally decimated for speed)."""
+    """Load STL bytes into a rotatable Plotly mesh (minimal decimation; keeps hole shapes truthful)."""
     loaded = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
     if isinstance(loaded, trimesh.Scene):
         mesh = trimesh.util.concatenate(tuple(loaded.geometry.values()))
     else:
         mesh = loaded
 
-    if len(mesh.faces) > max_faces:
-        try:
-            mesh = mesh.simplify_quadric_decimation(int(max_faces))
-        except BaseException:
-            pass
+    mesh = _clean_mesh(mesh)
+    mesh = _split_long_preview_edges(mesh, max_faces)
+    mesh = _maybe_decimate_for_plotly(mesh, max_faces)
 
     v = mesh.vertices
     f = mesh.faces
@@ -42,9 +83,11 @@ def figure_from_stl_bytes(
                 j=f[:, 1],
                 k=f[:, 2],
                 color="#b8c5d6",
+                # Smooth normals on CSG meshes make long skinny facets look like radial "stress lines".
+                # Flat facets read closer to lit plaster and match what an STL literally is (flat triangles).
                 flatshading=True,
-                lighting=dict(ambient=0.55, diffuse=0.85, specular=0.35),
-                lightposition=dict(x=80, y=120, z=200),
+                lighting=dict(ambient=0.78, diffuse=0.32, specular=0.12, roughness=0.45),
+                lightposition=dict(x=60, y=140, z=220),
             )
         ],
     )

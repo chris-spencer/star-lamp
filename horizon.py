@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 
 
@@ -44,15 +45,9 @@ def local_sidereal_time_deg(jd: float, lon_deg_east: float) -> float:
     return (greenwich_mean_sidereal_time_deg(jd) + lon_deg_east) % 360.0
 
 
-def ra_hours_to_deg(ra_h: float) -> float:
-    return (ra_h % 24.0) * 15.0
-
-
-def _wrap_pm180(x: float) -> float:
-    x = x % 360.0
-    if x > 180.0:
-        x -= 360.0
-    return x
+def _wrap_pm180_vec(x: np.ndarray) -> np.ndarray:
+    x = np.mod(x, 360.0)
+    return np.where(x > 180.0, x - 360.0, x)
 
 
 @dataclass(frozen=True)
@@ -60,6 +55,30 @@ class HorizonConfig:
     lat_deg: float
     lon_deg_east: float
     when_utc: datetime
+
+
+def alt_az_arrays(
+    ra_hours: np.ndarray, dec_deg: np.ndarray, cfg: HorizonConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized altitude/azimuth; RA in decimal hours matching :func:`altitude_azimuth`."""
+    jd = _julian_date(cfg.when_utc)
+    lst = local_sidereal_time_deg(jd, cfg.lon_deg_east)
+    ra_deg = np.mod(ra_hours, 24.0) * 15.0
+    h_deg = _wrap_pm180_vec(lst - ra_deg)
+    h = np.radians(h_deg)
+    dec = np.radians(np.asarray(dec_deg, dtype=float))
+    lat_rad = math.radians(cfg.lat_deg)
+    sin_lat = math.sin(lat_rad)
+    cos_lat = math.cos(lat_rad)
+
+    sin_alt = np.sin(dec) * sin_lat + np.cos(dec) * cos_lat * np.cos(h)
+    sin_alt = np.clip(sin_alt, -1.0, 1.0)
+    alt = np.degrees(np.arcsin(sin_alt))
+
+    y = -np.sin(h) * np.cos(dec)
+    x_h = cos_lat * np.sin(dec) - sin_lat * np.cos(dec) * np.cos(h)
+    az = (np.degrees(np.arctan2(y, x_h)) + 360.0) % 360.0
+    return alt, az
 
 
 def peak_altitude_deg(dec_deg: float, lat_deg: float) -> float:
@@ -70,6 +89,17 @@ def peak_altitude_deg(dec_deg: float, lat_deg: float) -> float:
     b = math.cos(dec) * math.cos(lat)
     s = min(1.0, max(-1.0, a + abs(b)))
     return math.degrees(math.asin(s))
+
+
+def peak_altitudes_deg_array(dec_deg: np.ndarray | pd.Series, lat_deg: float) -> np.ndarray:
+    """Vectorized :func:`peak_altitude_deg` for many declinations (same latitude)."""
+    d = np.asarray(dec_deg, dtype=float)
+    dec = np.radians(d)
+    lat = math.radians(lat_deg)
+    a = np.sin(dec) * math.sin(lat)
+    b = np.cos(dec) * math.cos(lat)
+    s = np.clip(a + np.abs(b), -1.0, 1.0)
+    return np.degrees(np.arcsin(s))
 
 
 def _star_label(row: pd.Series) -> str:
@@ -85,9 +115,12 @@ def _star_label(row: pd.Series) -> str:
 
 def infeasible_star_labels(df: pd.DataFrame, lat_deg: float, min_alt_deg: float) -> list[str]:
     """Stars that never reach min_alt_deg from this latitude (no need to search time)."""
+    if df.empty:
+        return []
+    peaks = peak_altitudes_deg_array(df["dec"].to_numpy(dtype=float, copy=False), lat_deg)
     bad: list[str] = []
-    for _, row in df.iterrows():
-        pk = peak_altitude_deg(float(row["dec"]), lat_deg)
+    for i, (_, row) in enumerate(df.iterrows()):
+        pk = float(peaks[i])
         if pk < min_alt_deg - 1e-6:
             bad.append(f"{_star_label(row)} (peak {pk:.1f}°)")
     return bad
@@ -100,12 +133,13 @@ def _min_altitude_over_stars(
     when_utc: datetime,
 ) -> float:
     """Minimum altitude among selected stars at this instant (bottleneck height)."""
+    if df.empty:
+        return 90.0
     cfg = HorizonConfig(lat_deg, lon_deg_east, when_utc)
-    lo = 90.0
-    for _, row in df.iterrows():
-        alt, _ = altitude_azimuth(float(row["ra"]), float(row["dec"]), cfg)
-        lo = min(lo, alt)
-    return lo
+    ra = df["ra"].to_numpy(dtype=float, copy=False)
+    dec = df["dec"].to_numpy(dtype=float, copy=False)
+    alts, _ = alt_az_arrays(ra, dec, cfg)
+    return float(np.min(alts))
 
 
 def _refine_maximin(
@@ -240,35 +274,17 @@ def altitude_azimuth(ra_hours: float, dec_deg: float, cfg: HorizonConfig) -> tup
     """
     Return (altitude_deg, azimuth_deg) measured from the horizon, north=0° east=90°.
     """
-    jd = _julian_date(cfg.when_utc)
-    lst = local_sidereal_time_deg(jd, cfg.lon_deg_east)
-    ra_deg = ra_hours_to_deg(ra_hours)
-    h_deg = _wrap_pm180(lst - ra_deg)
-    h = math.radians(h_deg)
-    dec = math.radians(dec_deg)
-    lat = math.radians(cfg.lat_deg)
-
-    sin_alt = math.sin(dec) * math.sin(lat) + math.cos(dec) * math.cos(lat) * math.cos(h)
-    sin_alt = min(1.0, max(-1.0, sin_alt))
-    alt = math.asin(sin_alt)
-
-    y = -math.sin(h) * math.cos(dec)
-    x = math.cos(lat) * math.sin(dec) - math.sin(lat) * math.cos(dec) * math.cos(h)
-    az = math.atan2(y, x)
-    az_deg = math.degrees(az) % 360.0
-    return math.degrees(alt), az_deg
+    alts, azs = alt_az_arrays(np.array([ra_hours], dtype=float), np.array([dec_deg], dtype=float), cfg)
+    return float(alts[0]), float(azs[0])
 
 
 def add_horizon_columns(df: pd.DataFrame, cfg: HorizonConfig) -> pd.DataFrame:
     if df.empty:
         return df.assign(alt_deg=pd.Series(dtype=float), az_deg=pd.Series(dtype=float))
 
-    alts = []
-    azs = []
-    for _, row in df.iterrows():
-        alt, az = altitude_azimuth(float(row["ra"]), float(row["dec"]), cfg)
-        alts.append(alt)
-        azs.append(az)
+    ra = df["ra"].to_numpy(dtype=float, copy=False)
+    dec = df["dec"].to_numpy(dtype=float, copy=False)
+    alts, azs = alt_az_arrays(ra, dec, cfg)
     out = df.copy()
     out["alt_deg"] = alts
     out["az_deg"] = azs

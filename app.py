@@ -25,7 +25,9 @@ from constellations import LABELS_SORTED
 from horizon import (
     HorizonConfig,
     add_horizon_columns,
+    alt_az_arrays,
     find_best_utc_maximin,
+    peak_altitudes_deg_array,
 )
 import mesh_export
 import stl_preview
@@ -144,6 +146,30 @@ def main() -> None:
             placeholder="e.g. UMi, CMa",
             help="Three-letter abbreviations from the HYG `con` column, comma or space separated.",
         )
+        pad_sky = st.checkbox(
+            "Fill sky with fainter background stars",
+            value=False,
+            help="Adds **real** HYG stars dimmer than your sidebar cut. Candidates must pass two checks: "
+            "they can eventually reach your minimum altitude from your latitude, and they are **at or above "
+            "that altitude at the UTC date & time** shown below (so fillers do not sit under the fake horizon "
+            "when you use **Find best time**).",
+        )
+        fill_ceiling = float(mag_limit)
+        if pad_sky:
+            if mag_limit >= 6.49:
+                st.caption(
+                    "Sidebar limit is already ~max — lower it slightly if you want a band of dimmer pad stars."
+                )
+            else:
+                fill_ceiling = st.slider(
+                    "Include padding stars mag ≤",
+                    float(mag_limit),
+                    6.5,
+                    float(min(mag_limit + 1.0, 6.5)),
+                    0.1,
+                    help="Still only catalog stars from HYG: magnitudes strictly fainter than your sidebar cut "
+                    "(between that cut and here). Higher numbers are dimmer.",
+                )
 
     with c2:
         st.subheader("Named stars")
@@ -177,7 +203,7 @@ def main() -> None:
         )
     parts.append(stars_by_proper_names(df, names, mag_limit))
 
-    selected = merge_star_selections(parts)
+    selected_core = merge_star_selections(parts)
 
     st.subheader("Observer & time")
     oc1, oc2, oc3 = st.columns(3)
@@ -224,14 +250,15 @@ def main() -> None:
 
     if st.button(
         "Find best time for selection",
-        disabled=selected.empty,
+        disabled=selected_core.empty,
         help=(
-            "Sets UTC date/time so the lowest star is as high as possible (within 366 days, "
-            "20-minute search step). Uses lat/lon and minimum altitude; astronomical horizon only."
+            "Uses **only** constellations, extra codes, and named stars—not background fillers. "
+            "Sets UTC date/time so the lowest chosen star is as high as possible (within 366 days, "
+            "20-minute coarse step); astronomical horizon only. Fillers apply afterward for preview/STL."
         ),
     ):
         found, msg = find_best_utc_maximin(
-            selected,
+            selected_core,
             float(lat),
             float(lon),
             float(min_alt),
@@ -249,6 +276,56 @@ def main() -> None:
         else:
             st.session_state.find_msg = ("bad", msg)
         st.rerun()
+
+    selected = selected_core
+    if pad_sky and fill_ceiling > mag_limit + 1e-6:
+        if selected_core.empty:
+            st.info("Choose constellations or named stars first — padding adds dimmer stars around that set.")
+        else:
+            keep_ids = set(selected_core["id"].tolist())
+            cand_mag = df[
+                (df["mag"] > mag_limit)
+                & (df["mag"] <= fill_ceiling)
+                & (~df["id"].isin(keep_ids))
+            ]
+            mag_band = len(cand_mag)
+            peaks = peak_altitudes_deg_array(cand_mag["dec"].to_numpy(dtype=float, copy=False), float(lat))
+            cand_peak = cand_mag.loc[peaks >= float(min_alt) - 1e-6].copy()
+            n_peak = len(cand_peak)
+
+            cfg_now = HorizonConfig(
+                lat_deg=float(lat),
+                lon_deg_east=float(lon),
+                when_utc=when,
+            )
+            instant_alts, _ = alt_az_arrays(
+                cand_peak["ra"].to_numpy(dtype=float, copy=False),
+                cand_peak["dec"].to_numpy(dtype=float, copy=False),
+                cfg_now,
+            )
+            cand = cand_peak.assign(_pad_alt_now=instant_alts)
+            cand = cand[cand["_pad_alt_now"] >= float(min_alt) - 1e-9].drop(columns=["_pad_alt_now"])
+            selected = merge_star_selections([selected_core, cand])
+            added = len(cand)
+            if added:
+                st.caption(
+                    f"Sky padding: **{added}** catalog stars visibly ≥ **{float(min_alt):.1f}°** at **{when.isoformat()}** "
+                    f"({mag_band} in magnitude band; {n_peak} could reach that height sometime from your latitude)."
+                )
+            elif mag_band == 0:
+                st.caption(
+                    "No stars in that magnitude band — raise the ceiling or lower the sidebar limit."
+                )
+            elif n_peak == 0:
+                st.caption(
+                    f"No padding stars reach ≥ {float(min_alt):.1f}° from your latitude ({mag_band} in mag band) — "
+                    "lower minimum altitude."
+                )
+            else:
+                st.caption(
+                    f"No fillers are ≥ {float(min_alt):.1f}° **at this time** ({n_peak} could do so later in the evening). "
+                    "Adjust date/time or minimum altitude."
+                )
 
     cfg = HorizonConfig(lat_deg=float(lat), lon_deg_east=float(lon), when_utc=when)
     with_horizon = add_horizon_columns(selected, cfg)
@@ -314,14 +391,22 @@ def main() -> None:
         shell_radius = float(outer_diameter) / 2.0
         shell_thickness = st.number_input("Shell wall thickness (mm)", value=3.0, min_value=0.5)
     with g2:
-        base_rr = st.number_input("Rod base radius (mm)", value=1.5, min_value=0.2)
+        base_rr = st.number_input(
+            "Rod base radius (mm)",
+            value=1.0,
+            min_value=0.2,
+            max_value=1.0,
+        )
         min_rr = st.number_input("Rod min radius (mm)", value=0.35, min_value=0.1)
         mq_map = dict(mesh_export.mesh_quality_presets())
         mq = st.selectbox(
             "STL mesh quality",
             options=list(mq_map.keys()),
-            index=0,
-            help="Finer meshes look smoother when printed; High is heavier to compute.",
+            index=2,
+            help=(
+                "**Icosphere** detail sets horizon-rim smoothness; **cylinder facets** control how round holes "
+                "look through the dome. Maximum is slow on many-star builds."
+            ),
         )
         ico_sub, cyl_sec = mq_map[mq]
 
@@ -374,7 +459,11 @@ def main() -> None:
     if blob:
         st.markdown("##### 3D preview")
         st.caption(
-            "Drag to rotate, scroll or pinch to zoom. Very dense meshes are simplified slightly for speed."
+            "Drag to rotate, scroll or pinch to zoom. The shade is rendered as STL **triangle facets** "
+            "(CSG cutters often produce long skinny triangles); we use softer lighting so the Plotly viewer "
+            f"doesn't exaggerate streaks—your exported file matches the mesh. Extremely dense meshes "
+            f"(≳{stl_preview.DEFAULT_PREVIEW_FACE_CAP:,} triangles) may be simplified once **only here** "
+            "for responsiveness."
         )
         try:
             fig = stl_preview.figure_from_stl_bytes(blob)

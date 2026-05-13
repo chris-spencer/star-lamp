@@ -134,8 +134,8 @@ def build_lamp_mesh(
     shell_thickness: float,
     base_rod_radius: float,
     minimum_rod_radius: float,
-    ico_subdiv: int = 4,
-    cylinder_sections: int = 32,
+    ico_subdiv: int = 6,
+    cylinder_sections: int = 96,
     hole_penetration_mm: float | None = None,
     placement: Literal["equatorial", "local_sky"] = "local_sky",
 ) -> trimesh.Trimesh:
@@ -205,9 +205,14 @@ def mesh_to_stl_bytes(mesh: trimesh.Trimesh) -> bytes:
 
 
 def mesh_quality_presets() -> list[tuple[str, tuple[int, int]]]:
-    """Label → (icosphere subdivisions, cylinder edge count)."""
+    """Label → (icosphere subdivisions, cylinder edge count).
+
+    The shell is a clipped icosphere: low subdivision visibly facets the horizon rim.
+    Holes use revolving cylinders → few ``sections`` look polygonal against a curved shell.
+    """
     return [
-        ("Balanced (good speed)", (4, 32)),
-        ("High (smoother, slower)", (5, 48)),
-        ("Draft (quick preview)", (3, 24)),
+        ("Draft (faster)", (5, 64)),
+        ("Balanced", (6, 80)),
+        ("High (recommended for print)", (6, 96)),
+        ("Maximum", (7, 128)),
     ]
