@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import io
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
 import trimesh
 from trimesh.transformations import rotation_matrix, translation_matrix
+
+from horizon import horizontal_unit_vector
 
 ENGINE = "manifold"
 
@@ -24,6 +26,57 @@ def _mag_clamped(mag: float) -> float:
 def _hole_radius(mag: float, base_rr: float, min_rr: float) -> float:
     delta = base_rr - min_rr
     return base_rr - (_mag_clamped(mag) / 6.5) * delta
+
+
+def _rot_align_z_to(d: np.ndarray) -> np.ndarray:
+    """Rigid rotation mapping +Z to unit direction d (column vectors)."""
+    d = np.asarray(d, dtype=np.float64).reshape(3)
+    n = np.linalg.norm(d)
+    if n < 1e-12:
+        return np.eye(4)
+    d = d / n
+    z = np.array([0.0, 0.0, 1.0])
+    c = float(np.dot(d, z))
+    if c >= 1.0 - 1e-12:
+        return np.eye(4)
+    if c <= -1.0 + 1e-12:
+        return rotation_matrix(np.pi, [1.0, 0.0, 0.0])
+    v = np.cross(z, d)
+    s = np.linalg.norm(v)
+    vx = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+    r3 = np.eye(3) + vx + vx @ vx * ((1.0 - c) / (s**2))
+    m = np.eye(4)
+    m[:3, :3] = r3
+    return m
+
+
+def _rod_world_matrix_dir(d: np.ndarray, ray_start: float, height: float) -> np.ndarray:
+    r = _rot_align_z_to(d)
+    tz = translation_matrix([0.0, 0.0, ray_start + height / 2.0])
+    return r @ tz
+
+
+def _star_cylinder_sky(
+    alt_deg: float,
+    az_deg: float,
+    mag: float,
+    ray_start: float,
+    ray_end: float,
+    base_rr: float,
+    minimum_rr: float,
+    sections: int,
+) -> Optional[trimesh.Trimesh]:
+    x, y, z = horizontal_unit_vector(alt_deg, az_deg)
+    d = np.array([x, y, z], dtype=np.float64)
+    h = float(ray_end) - float(ray_start)
+    if h <= 1e-4:
+        return None
+    rad = _hole_radius(mag, base_rr, minimum_rr)
+    if rad <= 1e-4:
+        return None
+    cyl = trimesh.creation.cylinder(radius=float(rad), height=float(h), sections=int(sections))
+    cyl.apply_transform(_rod_world_matrix_dir(d, float(ray_start), float(h)))
+    return cyl
 
 
 def _rod_world_matrix(
@@ -84,12 +137,15 @@ def build_lamp_mesh(
     ico_subdiv: int = 4,
     cylinder_sections: int = 32,
     hole_penetration_mm: float | None = None,
+    placement: Literal["equatorial", "local_sky"] = "local_sky",
 ) -> trimesh.Trimesh:
     """
     CSG: hollow sphere clipped to z ≥ 0, subtract radial cylinders that cut the full wall.
 
-    Each hole runs from just inside the inner spherical surface to just past the outer surface
-    so the opening is through the shell (not a blind pocket).
+    ``local_sky``: holes aim along altitude/azimuth so the upper dome matches the sky
+    above your horizon (zenith = +Z, rim = horizon).
+
+    ``equatorial``: classic RA/Dec / planetarium mapping on a sphere.
     """
     r_out = float(shell_radius)
     r_in = float(r_out - shell_thickness)
@@ -111,16 +167,28 @@ def build_lamp_mesh(
 
     cyls: list[trimesh.Trimesh] = []
     for _, row in df.iterrows():
-        c = _star_cylinder(
-            float(row["ra"]),
-            float(row["dec"]),
-            float(row["mag"]),
-            ray_start,
-            ray_end,
-            base_rod_radius,
-            minimum_rod_radius,
-            cylinder_sections,
-        )
+        if placement == "local_sky":
+            c = _star_cylinder_sky(
+                float(row["alt_deg"]),
+                float(row["az_deg"]),
+                float(row["mag"]),
+                ray_start,
+                ray_end,
+                base_rod_radius,
+                minimum_rod_radius,
+                cylinder_sections,
+            )
+        else:
+            c = _star_cylinder(
+                float(row["ra"]),
+                float(row["dec"]),
+                float(row["mag"]),
+                ray_start,
+                ray_end,
+                base_rod_radius,
+                minimum_rod_radius,
+                cylinder_sections,
+            )
         if c is not None and c.faces is not None and len(c.faces) > 0:
             cyls.append(c)
 

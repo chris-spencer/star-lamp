@@ -222,6 +222,20 @@ def find_best_utc_maximin(
     return final_t, " ".join(notes)
 
 
+def horizontal_unit_vector(alt_deg: float, az_deg: float) -> tuple[float, float, float]:
+    """
+    East-North-Zenith Cartesian unit vector for local horizontal coordinates.
+    Matches altitude_azimuth: azimuth north = 0°, east = 90°.
+    """
+    alt = math.radians(alt_deg)
+    az = math.radians(az_deg)
+    ca = math.cos(alt)
+    x = ca * math.sin(az)
+    y = ca * math.cos(az)
+    z = math.sin(alt)
+    return x, y, z
+
+
 def altitude_azimuth(ra_hours: float, dec_deg: float, cfg: HorizonConfig) -> tuple[float, float]:
     """
     Return (altitude_deg, azimuth_deg) measured from the horizon, north=0° east=90°.

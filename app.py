@@ -26,6 +26,7 @@ from horizon import (
     find_best_utc_maximin,
 )
 import mesh_export
+import stl_preview
 
 st.set_page_config(page_title="Star lamp / planetarium shade", layout="wide")
 
@@ -35,6 +36,15 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 @st.cache_data(show_spinner=False)
 def cached_hyg(csv_path_str: str) -> pd.DataFrame:
     return load_hyg(Path(csv_path_str))
+
+
+_MAG_PRESETS: list[tuple[str, float | None]] = [
+    ("Main stars only — clearest for kids", 3.5),
+    ("Mostly bright stars", 4.5),
+    ("Typical mix (default)", 5.0),
+    ("Lots of stars (incl. fainter dots)", 6.2),
+    ("Custom limit…", None),
+]
 
 
 def main() -> None:
@@ -57,7 +67,42 @@ def main() -> None:
         else:
             st.caption(str(hyg_path))
 
-        mag_limit = st.slider("Max magnitude (per star)", 2.0, 6.5, 5.0, 0.1)
+        st.subheader("Star brightness")
+        st.caption(
+            "Fainter stars have **higher** magnitude numbers. Only stars **at or above** "
+            "your chosen brightness are used (we keep mag ≤ limit)."
+        )
+        preset_idx = st.selectbox(
+            "Preset",
+            range(len(_MAG_PRESETS)),
+            index=2,
+            format_func=lambda i: _MAG_PRESETS[i][0],
+            help="Tighter limits drop faint pinholes so famous constellation shapes stand out.",
+        )
+        preset_limit = _MAG_PRESETS[preset_idx][1]
+        if preset_limit is None:
+            mag_limit = st.slider(
+                "Max magnitude to include",
+                2.0,
+                6.5,
+                5.0,
+                0.1,
+                help="Stars with apparent magnitude ≤ this value are included.",
+            )
+        else:
+            mag_limit = preset_limit
+            st.caption(
+                f"Active limit: **magnitude ≤ {mag_limit:.1f}** — dimmer (higher-number) stars are left out."
+            )
+
+        st.divider()
+        if st.button(
+            "Reset session",
+            help="Clear constellations cache in memory, time, STL, and reload defaults.",
+        ):
+            for _k in list(st.session_state.keys()):
+                del st.session_state[_k]
+            st.rerun()
 
     if not hyg_path.exists():
         st.stop()
@@ -71,7 +116,7 @@ def main() -> None:
             "IAU constellations",
             options=LABELS_SORTED,
             default=["Ursa Major", "Orion", "Cassiopeia"],
-            help="All stars in HYG with `con` matching this abbreviation and magnitude ≤ limit.",
+            help="Uses your brightness preset from the sidebar (stars with mag ≤ that limit).",
         )
         extra = st.text_input(
             "Extra IAU codes (optional)",
@@ -130,7 +175,13 @@ def main() -> None:
             help="Default: Sherwood Observatory (1°13′W → −1.2220°).",
         )
     with oc3:
-        min_alt = st.number_input('Minimum altitude (°, "fake horizon")', value=0.0, step=1.0)
+        min_alt = st.number_input(
+            'Minimum altitude (°, "fake horizon")',
+            value=0.0,
+            step=1.0,
+            help="With **Sky** dome layout, only stars at least this high appear in the STL. "
+            "Preview always lists all selected stars.",
+        )
 
     pud = st.session_state.pop("pending_utc_date", None)
     put = st.session_state.pop("pending_utc_time", None)
@@ -222,6 +273,40 @@ def main() -> None:
         st.dataframe(show.sort_values("alt_deg", ascending=False), width="stretch")
 
     st.subheader("Geometry & STL export")
+    dome_mapping = st.radio(
+        "Dome layout",
+        options=["sky", "globe"],
+        index=0,
+        format_func=lambda k: (
+            "Sky at your date & time — like looking up (recommended)"
+            if k == "sky"
+            else "Celestial globe — fixed RA/Dec on the shell"
+        ),
+        help="Sky mode maps holes by altitude/azimuth so Orion matches your southern sky at the "
+        "chosen instant. Globe mode uses classic planetarium RA/Dec (no horizon cut on the mesh).",
+    )
+
+    if with_horizon.empty:
+        for_stl = with_horizon
+    else:
+        if dome_mapping == "sky":
+            for_stl = with_horizon[with_horizon["alt_deg"] >= float(min_alt) - 1e-9].copy()
+            st.caption(
+                f"STL will drill **{len(for_stl)}** star(s) at ≥ {float(min_alt):.1f}° "
+                f"(of {len(with_horizon)} in the table)."
+            )
+        else:
+            for_stl = with_horizon.copy()
+            st.caption(
+                f"STL will drill all **{len(for_stl)}** stars; horizon altitude only affects the table."
+            )
+
+    if not with_horizon.empty and for_stl.empty and dome_mapping == "sky":
+        st.warning(
+            "No stars clear your minimum altitude for the STL. Lower the altitude cut, adjust "
+            "date/time, or switch to **Celestial globe** to print all listed stars."
+        )
+
     g1, g2 = st.columns(2)
     with g1:
         outer_diameter = st.number_input(
@@ -258,7 +343,7 @@ def main() -> None:
     build_py_stl = st.button(
         "Build STL for 3D printing",
         type="primary",
-        disabled=with_horizon.empty,
+        disabled=with_horizon.empty or for_stl.empty,
         help="Creates `output/lamp_shade.stl` and enables download.",
     )
 
@@ -266,13 +351,14 @@ def main() -> None:
         try:
             with st.spinner("Computing mesh — wait for all star subtractions to finish…"):
                 mesh = mesh_export.build_lamp_mesh(
-                    with_horizon,
+                    for_stl,
                     shell_radius=float(shell_radius),
                     shell_thickness=float(shell_thickness),
                     base_rod_radius=float(base_rr),
                     minimum_rod_radius=float(min_rr),
                     ico_subdiv=int(ico_sub),
                     cylinder_sections=int(cyl_sec),
+                    placement="local_sky" if dome_mapping == "sky" else "equatorial",
                 )
                 stl_bytes = mesh_export.mesh_to_stl_bytes(mesh)
             stl_path = OUTPUT_DIR / "lamp_shade.stl"
@@ -281,8 +367,8 @@ def main() -> None:
             st.session_state["stl_blob"] = stl_bytes
             st.session_state["stl_name"] = "lamp_shade.stl"
             st.success(
-                f"STL ready ({len(stl_bytes) // 1024} KB, watertight={mesh.is_watertight}). "
-                f"Saved `{stl_path}` — download below."
+                f"STL ready ({len(stl_bytes) // 1024} KB, watertight={mesh.is_watertight}, "
+                f"{len(for_stl)} holes). Saved `{stl_path}` — download below."
             )
         except Exception as e:
             st.session_state["stl_blob"] = None
@@ -290,6 +376,16 @@ def main() -> None:
 
     blob = st.session_state.get("stl_blob")
     if blob:
+        st.markdown("##### 3D preview")
+        st.caption(
+            "Drag to rotate, scroll or pinch to zoom. Very dense meshes are simplified slightly for speed."
+        )
+        try:
+            fig = stl_preview.figure_from_stl_bytes(blob)
+            st.plotly_chart(fig, use_container_width=True, key="stl_preview_chart")
+        except Exception as e:
+            st.warning(f"Could not build 3D preview: {e}")
+
         st.download_button(
             label=f"Download {st.session_state.get('stl_name', 'lamp_shade.stl')}",
             data=blob,
