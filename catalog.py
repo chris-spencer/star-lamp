@@ -29,15 +29,22 @@ HYG_PINNED_COMMIT: str = _m.group(1)
 _HYG_PLAIN_CURRENT = re.compile(r"^hygdata_v\d+(?:_\d+)?\.csv$")
 
 
-def _github_json(url: str, timeout: float) -> object | None:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "star-lamp-hyg-check",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
+def _github_json(
+    url: str,
+    timeout: float,
+    *,
+    github_token: str | None = None,
+) -> object | None:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "star-lamp/1.0 (HYG freshness; github.com)",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if github_token:
+        tok = github_token.strip()
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
@@ -53,10 +60,14 @@ def hyg_plain_csv_version_key(filename: str) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2) or 0)
 
 
-def hyg_current_catalog_relpath(timeout: float = 12.0) -> str | None:
+def hyg_current_catalog_relpath(
+    timeout: float = 12.0,
+    *,
+    github_token: str | None = None,
+) -> str | None:
     """Latest plain ``hyg/CURRENT/hygdata_v*.csv`` on ``main``, or ``None`` if the API fails."""
     url = f"{GITHUB_API}/contents/hyg/CURRENT?ref=main"
-    blob = _github_json(url, timeout)
+    blob = _github_json(url, timeout, github_token=github_token)
     if not isinstance(blob, list):
         return None
     names = [
@@ -73,17 +84,26 @@ def hyg_current_catalog_relpath(timeout: float = 12.0) -> str | None:
     return f"hyg/CURRENT/{best}"
 
 
-def hyg_resolve_current_catalog_download(timeout: float = 30.0) -> tuple[str, str] | None:
+def hyg_resolve_current_catalog_download(
+    timeout: float = 30.0,
+    *,
+    github_token: str | None = None,
+) -> tuple[str, str] | None:
     """``(raw_url, repo_relative_path)`` for the newest CURRENT plain CSV."""
-    rel = hyg_current_catalog_relpath(timeout)
+    rel = hyg_current_catalog_relpath(timeout, github_token=github_token)
     return None if rel is None else (RAW_MAIN_PREFIX + rel, rel)
 
 
-def hyg_latest_main_commit_for_path(relpath: str, timeout: float = 12.0) -> str | None:
+def hyg_latest_main_commit_for_path(
+    relpath: str,
+    timeout: float = 12.0,
+    *,
+    github_token: str | None = None,
+) -> str | None:
     """Most recent ``main`` commit that touched ``relpath`` (full repo path)."""
     q = urllib.parse.quote(relpath, safe="")
     api = f"{GITHUB_API}/commits?path={q}&sha=main&per_page=1"
-    blob = _github_json(api, timeout)
+    blob = _github_json(api, timeout, github_token=github_token)
     if not isinstance(blob, list) or not blob:
         return None
     sha = blob[0].get("sha")
@@ -92,10 +112,18 @@ def hyg_latest_main_commit_for_path(relpath: str, timeout: float = 12.0) -> str 
     return None
 
 
-def hyg_upstream_current_commit(timeout: float = 12.0) -> str | None:
+def hyg_upstream_current_commit(
+    timeout: float = 12.0,
+    *,
+    github_token: str | None = None,
+) -> str | None:
     """Git SHA for the upstream tip commit affecting the CURRENT plain CSV (for freshness checks)."""
-    rel = hyg_current_catalog_relpath(timeout)
-    return None if rel is None else hyg_latest_main_commit_for_path(rel, timeout)
+    rel = hyg_current_catalog_relpath(timeout, github_token=github_token)
+    return (
+        None
+        if rel is None
+        else hyg_latest_main_commit_for_path(rel, timeout, github_token=github_token)
+    )
 
 
 def default_hyg_path() -> Path:
@@ -139,20 +167,25 @@ def hyg_catalog_freshness(csv_path: Path, upstream_main_commit: str | None) -> H
     return "stale"
 
 
-def ensure_hyg_csv(path: Path | None = None, force: bool = False) -> Path:
+def ensure_hyg_csv(
+    path: Path | None = None,
+    force: bool = False,
+    *,
+    github_token: str | None = None,
+) -> Path:
     p = path or default_hyg_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists() and not force:
         return p
     if force:
-        resolved = hyg_resolve_current_catalog_download(timeout=60.0)
+        resolved = hyg_resolve_current_catalog_download(timeout=60.0, github_token=github_token)
         if resolved is None:
             urllib.request.urlretrieve(HYG_URL, p)
             write_hyg_download_commit(p, HYG_PINNED_COMMIT)
         else:
             url, rel = resolved
             urllib.request.urlretrieve(url, p)
-            latest = hyg_latest_main_commit_for_path(rel, timeout=30.0)
+            latest = hyg_latest_main_commit_for_path(rel, timeout=30.0, github_token=github_token)
             if latest:
                 write_hyg_download_commit(p, latest)
         return p

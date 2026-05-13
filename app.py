@@ -73,15 +73,33 @@ def _format_lat_lon_friendly(lat: float, lon: float) -> str:
     ew = "E" if lon >= 0 else "W"
     return f"{abs(lat):.2f}°{ns}, {abs(lon):.2f}°{ew}"
 
+def _optional_github_pat() -> str | None:
+    """Fine-grained or classic PAT for GitHub REST (higher rate limits on Streamlit Cloud)."""
+    try:
+        t = st.secrets["GITHUB_TOKEN"]
+    except (KeyError, FileNotFoundError):
+        return None
+    if isinstance(t, str) and t.strip():
+        return t.strip()
+    return None
+
 
 @st.cache_data(show_spinner=False)
 def cached_hyg(csv_path_str: str) -> pd.DataFrame:
     return load_hyg(Path(csv_path_str))
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def _cached_upstream_hyg_commit() -> str | None:
-    return hyg_upstream_current_commit(timeout=12.0)
+@st.cache_data(ttl=21_600, show_spinner=False)
+def _cached_upstream_hyg_commit_anon() -> str | None:
+    """Shared GitHub API quota on hosted Streamlit — cache anonymous checks for several hours."""
+    return hyg_upstream_current_commit(timeout=20.0, github_token=None)
+
+
+def _sidebar_upstream_commit() -> str | None:
+    tok = _optional_github_pat()
+    if tok:
+        return hyg_upstream_current_commit(timeout=20.0, github_token=tok)
+    return _cached_upstream_hyg_commit_anon()
 
 
 _MAG_PRESETS: list[tuple[str, float | None]] = [
@@ -119,7 +137,8 @@ def main() -> None:
                 f"Unlocks {_format_when_utc_friendly(dl_unlock)}."
             )
         elif have_catalog_csv:
-            dl_help = "Fetch the latest HYG catalogue from upstream and overwrite your local CSV."
+            dl_help = "Fetch the latest HYG catalogue from upstream and replace the app's copy on this server."
+
         else:
             dl_help = "Download the star catalogue CSV once so the app can resolve constellations and names."
 
@@ -128,11 +147,12 @@ def main() -> None:
             disabled=have_catalog_csv and dl_cooldown,
             help=dl_help,
         ):
-            ensure_hyg_csv(hyg_path, force=True)
+            ensure_hyg_csv(hyg_path, force=True, github_token=_optional_github_pat())
             cached_hyg.clear()
             st.success("Star charts updated — you're ready to plot stars.")
 
-        freshness = hyg_catalog_freshness(hyg_path, _cached_upstream_hyg_commit())
+        freshness = hyg_catalog_freshness(hyg_path, _sidebar_upstream_commit())
+
         if freshness == "missing":
             st.warning("Star catalogue not found — use **Download Star Charts** above.")
         elif freshness == "current":
@@ -149,9 +169,10 @@ def main() -> None:
                     "to fetch the latest file."
                 )
         else:
-            st.info(
-                "Star catalogue is on your computer, but we couldn't check for updates "
-                "(offline or GitHub rate limiting). Try again later."
+            st.success(
+                "Star catalogue **is loaded** — the app runs normally. **Version check** against GitHub did not "
+                "complete (temporary network/API limits—typical on shared hosting such as Streamlit Community Cloud). "
+                "STL export still works. *Optional:* add Streamlit secret **`GITHUB_TOKEN`** (GitHub PAT) for higher GitHub quotas."
             )
 
         st.subheader("Star Brightness")
