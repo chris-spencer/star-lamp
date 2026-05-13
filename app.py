@@ -11,6 +11,8 @@ import streamlit as st
 from catalog import (
     default_hyg_path,
     ensure_hyg_csv,
+    hyg_catalog_freshness,
+    hyg_upstream_current_commit,
     load_hyg,
     merge_star_selections,
     parse_extra_codes,
@@ -38,6 +40,11 @@ def cached_hyg(csv_path_str: str) -> pd.DataFrame:
     return load_hyg(Path(csv_path_str))
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_upstream_hyg_commit() -> str | None:
+    return hyg_upstream_current_commit(timeout=12.0)
+
+
 _MAG_PRESETS: list[tuple[str, float | None]] = [
     ("Main stars only — clearest for kids", 3.5),
     ("Mostly bright stars", 4.5),
@@ -61,11 +68,23 @@ def main() -> None:
         if st.button("Download / refresh HYG v3"):
             ensure_hyg_csv(hyg_path, force=True)
             cached_hyg.clear()
-            st.success(f"Saved {hyg_path}")
-        if not hyg_path.exists():
+            st.success("HYG catalog downloaded — you are ready to plot stars.")
+
+        freshness = hyg_catalog_freshness(hyg_path, _cached_upstream_hyg_commit())
+        if freshness == "missing":
             st.warning("HYG catalog not found yet — click the button above once.")
+        elif freshness == "current":
+            st.success("HYG catalog is present and up to date with upstream.")
+        elif freshness == "stale":
+            st.warning(
+                "Your HYG catalog may be **out of date** compared to upstream. "
+                "Use **Download / refresh HYG v3** to pull the newest file."
+            )
         else:
-            st.caption(str(hyg_path))
+            st.info(
+                "HYG catalog is present — could not check GitHub right now "
+                "(offline or rate limiting). Retry later or refresh manually."
+            )
 
         st.subheader("Star brightness")
         st.caption(
@@ -103,6 +122,8 @@ def main() -> None:
             for _k in list(st.session_state.keys()):
                 del st.session_state[_k]
             st.rerun()
+
+        st.caption(f"Copyright Chris Spencer {dt.date.today().year}")
 
     if not hyg_path.exists():
         st.stop()
@@ -177,7 +198,7 @@ def main() -> None:
     with oc3:
         min_alt = st.number_input(
             'Minimum altitude (°, "fake horizon")',
-            value=0.0,
+            value=20.0,
             step=1.0,
             help="With **Sky** dome layout, only stars at least this high appear in the STL. "
             "Preview always lists all selected stars.",
@@ -201,40 +222,33 @@ def main() -> None:
         kind, text = st.session_state.pop("find_msg")
         (st.success if kind == "ok" else st.warning)(text)
 
-    with st.expander("Best time for this selection (maximize joint height)"):
-        st.caption(
-            "Chooses a UTC time in the search window that makes the **lowest** star in your "
-            "list as high as possible (best “common” height). If your minimum altitude can be "
-            "met somewhere, only those moments are considered, then the lowest star is pushed "
-            "as high as possible. Astronomical horizon only (no Sun/twilight)."
+    if st.button(
+        "Find best time for selection",
+        disabled=selected.empty,
+        help=(
+            "Sets UTC date/time so the lowest star is as high as possible (within 366 days, "
+            "20-minute search step). Uses lat/lon and minimum altitude; astronomical horizon only."
+        ),
+    ):
+        found, msg = find_best_utc_maximin(
+            selected,
+            float(lat),
+            float(lon),
+            float(min_alt),
+            when,
+            max_days=366,
+            step_minutes=20,
         )
-        max_days = st.slider("Maximum days to search", 30, 730, 366, step=1)
-        step_coarse = st.selectbox("Coarse step (minutes)", options=[10, 15, 20, 30], index=2)
-        go = st.button(
-            "Set date & time to best joint height",
-            disabled=selected.empty,
-            help="Uses latitude, longitude, minimum altitude as a floor (when achievable), and current stars.",
-        )
-        if go:
-            found, msg = find_best_utc_maximin(
-                selected,
-                float(lat),
-                float(lon),
-                float(min_alt),
-                when,
-                max_days=int(max_days),
-                step_minutes=int(step_coarse),
+        if found:
+            st.session_state.pending_utc_date = found.date()
+            st.session_state.pending_utc_time = found.time()
+            st.session_state.find_msg = (
+                "ok",
+                f"{found.isoformat()} UTC — {msg}",
             )
-            if found:
-                st.session_state.pending_utc_date = found.date()
-                st.session_state.pending_utc_time = found.time()
-                st.session_state.find_msg = (
-                    "ok",
-                    f"{found.isoformat()} UTC — {msg}",
-                )
-            else:
-                st.session_state.find_msg = ("bad", msg)
-            st.rerun()
+        else:
+            st.session_state.find_msg = ("bad", msg)
+        st.rerun()
 
     cfg = HorizonConfig(lat_deg=float(lat), lon_deg_east=float(lon), when_utc=when)
     with_horizon = add_horizon_columns(selected, cfg)
@@ -273,38 +287,20 @@ def main() -> None:
         st.dataframe(show.sort_values("alt_deg", ascending=False), width="stretch")
 
     st.subheader("Geometry & STL export")
-    dome_mapping = st.radio(
-        "Dome layout",
-        options=["sky", "globe"],
-        index=0,
-        format_func=lambda k: (
-            "Sky at your date & time — like looking up (recommended)"
-            if k == "sky"
-            else "Celestial globe — fixed RA/Dec on the shell"
-        ),
-        help="Sky mode maps holes by altitude/azimuth so Orion matches your southern sky at the "
-        "chosen instant. Globe mode uses classic planetarium RA/Dec (no horizon cut on the mesh).",
-    )
 
     if with_horizon.empty:
         for_stl = with_horizon
     else:
-        if dome_mapping == "sky":
-            for_stl = with_horizon[with_horizon["alt_deg"] >= float(min_alt) - 1e-9].copy()
-            st.caption(
-                f"STL will drill **{len(for_stl)}** star(s) at ≥ {float(min_alt):.1f}° "
-                f"(of {len(with_horizon)} in the table)."
-            )
-        else:
-            for_stl = with_horizon.copy()
-            st.caption(
-                f"STL will drill all **{len(for_stl)}** stars; horizon altitude only affects the table."
-            )
+        for_stl = with_horizon[with_horizon["alt_deg"] >= float(min_alt) - 1e-9].copy()
+        st.caption(
+            f"STL will drill **{len(for_stl)}** star(s) at ≥ {float(min_alt):.1f}° "
+            f"(of {len(with_horizon)} in the table)."
+        )
 
-    if not with_horizon.empty and for_stl.empty and dome_mapping == "sky":
+    if not with_horizon.empty and for_stl.empty:
         st.warning(
-            "No stars clear your minimum altitude for the STL. Lower the altitude cut, adjust "
-            "date/time, or switch to **Celestial globe** to print all listed stars."
+            "No stars clear your minimum altitude for the STL. Lower the altitude cut or adjust "
+            "date/time, location, or selection."
         )
 
     g1, g2 = st.columns(2)
@@ -358,7 +354,7 @@ def main() -> None:
                     minimum_rod_radius=float(min_rr),
                     ico_subdiv=int(ico_sub),
                     cylinder_sections=int(cyl_sec),
-                    placement="local_sky" if dome_mapping == "sky" else "equatorial",
+                    placement="local_sky",
                 )
                 stl_bytes = mesh_export.mesh_to_stl_bytes(mesh)
             stl_path = OUTPUT_DIR / "lamp_shade.stl"
